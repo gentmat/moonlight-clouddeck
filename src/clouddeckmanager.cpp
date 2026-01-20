@@ -16,6 +16,7 @@ CloudDeckManager::CloudDeckManager(QObject *parent)
     , m_parseStep(0)
     , m_statusPollTimer(new QTimer(this))
     , m_waitingForInstanceStart(false)
+    , m_operationMode(MODE_PAIRING)
 {
     // Set up timeout timer
     m_timeoutTimer->setSingleShot(true);
@@ -70,7 +71,7 @@ void CloudDeckManager::loginWithCredentials(const QString &email, const QString 
     m_password = password;
     m_loginInProgress = true;
     
-    qInfo() << "CloudDeck: Starting login process, navigating to CloudDeck portal...";
+    qInfo() << "CloudDeck: Starting login process (mode: " << (m_operationMode == MODE_PAIRING ? "PAIRING" : "MANUAL_START") << ")...";
     
     // Start timeout timer
     m_timeoutTimer->start();
@@ -304,12 +305,27 @@ void CloudDeckManager::checkPageAfterSubmission()
             m_loginInProgress = false;
             m_formSubmitted = false;
             
-            qInfo() << "CloudDeck: Login successful! Now parsing dashboard...";
+            qInfo() << "CloudDeck: Login successful!";
+            
+            // Store credentials for future use
+            QSettings settings;
+            settings.setValue("clouddeck/email", m_email);
+            settings.setValue("clouddeck/password", m_password);
+            qInfo() << "CloudDeck: Credentials stored for future use";
+            
             emit loginCompleted(true, "");
             
-            // Start parsing the dashboard
-            m_parseStep = 0;
-            parseDashboard();
+            // Handle based on operation mode
+            if (m_operationMode == MODE_PAIRING) {
+                // Full flow: parse dashboard to get status and password
+                qInfo() << "CloudDeck: [PAIRING] Parsing dashboard...";
+                m_parseStep = 0;
+                parseDashboard();
+            } else if (m_operationMode == MODE_MANUAL_START) {
+                // Just start the instance
+                qInfo() << "CloudDeck: [MANUAL_START] Starting instance...";
+                startInstanceOnly();
+            }
         } else {
             // Still on login page - check for error messages
             if (html.contains("error") || html.contains("invalid") || html.contains("incorrect")) {
@@ -666,15 +682,24 @@ void CloudDeckManager::printMachineInfo()
     
     emit machineInfoReady(m_machineStatus, m_userPassword, m_sessionDuration);
     
-    // Check if instance is off - if so, start it and wait
-    if (m_machineStatus.contains("Off", Qt::CaseInsensitive) || 
-        m_machineStatus.contains("Stopped", Qt::CaseInsensitive)) {
-        qInfo() << "CloudDeck: Instance is off, starting it...";
-        emit instanceStarting();
-        QTimer::singleShot(1000, this, &CloudDeckManager::clickStartButton);
-    } else {
-        // Instance is running, proceed to connect
-        QTimer::singleShot(1000, this, &CloudDeckManager::clickConnectButton);
+    // PAIRING MODE: Full flow with password and connection
+    if (m_operationMode == MODE_PAIRING) {
+        // Check if instance is off - if so, start it and wait
+        if (m_machineStatus.contains("Off", Qt::CaseInsensitive) || 
+            m_machineStatus.contains("Stopped", Qt::CaseInsensitive)) {
+            qInfo() << "CloudDeck: [PAIRING] Instance is off, starting it...";
+            emit instanceStarting();
+            QTimer::singleShot(1000, this, &CloudDeckManager::clickStartButton);
+        } else {
+            // Instance is running, proceed to connect
+            qInfo() << "CloudDeck: [PAIRING] Instance is running, connecting...";
+            QTimer::singleShot(1000, this, &CloudDeckManager::clickConnectButton);
+        }
+    }
+    // MANUAL_START MODE: Just start, don't get password or connect
+    else if (m_operationMode == MODE_MANUAL_START) {
+        qInfo() << "CloudDeck: [MANUAL_START] Mode - skipping password/connect";
+        // Already handled by startInstanceOnly()
     }
 }
 
@@ -682,19 +707,50 @@ void CloudDeckManager::startCloudDeckInstance()
 {
     qInfo() << "CloudDeck: startCloudDeckInstance() called";
     
-    if (!m_webEngineInitialized) {
-        qInfo() << "CloudDeck: Web engine not initialized, cannot start instance";
+    // Check if we have stored credentials
+    if (!hasStoredCredentials()) {
+        qInfo() << "CloudDeck: No stored credentials, cannot start instance";
+        emit instanceStatusChanged("Error: No stored credentials");
         return;
     }
     
-    // Navigate to dashboard if not already there
-    if (!m_webPage->url().toString().contains("portal.clouddeck.app")) {
-        qInfo() << "CloudDeck: Navigating to dashboard...";
-        m_webPage->load(QUrl("https://portal.clouddeck.app"));
-        QTimer::singleShot(3000, this, &CloudDeckManager::clickStartButton);
-    } else {
-        clickStartButton();
+    // Set operation mode to MANUAL_START
+    m_operationMode = MODE_MANUAL_START;
+    
+    // Initialize web engine if needed
+    if (!m_webEngineInitialized) {
+        qInfo() << "CloudDeck: Initializing web engine...";
+        initializeWebEngine();
     }
+    
+    // Check if we're already on the dashboard (logged in)
+    QString currentUrl = m_webPage->url().toString();
+    qInfo() << "CloudDeck: Current URL:" << currentUrl;
+    
+    if (currentUrl.contains("portal.clouddeck.app") && !currentUrl.contains("/login")) {
+        // Already logged in, just start instance
+        qInfo() << "CloudDeck: Already on dashboard, starting instance...";
+        startInstanceOnly();
+    } else {
+        // Need to login first
+        qInfo() << "CloudDeck: Not logged in, logging in with stored credentials...";
+        QSettings settings;
+        QString email = settings.value("clouddeck/email").toString();
+        QString password = settings.value("clouddeck/password").toString();
+        
+        // Login, then start instance (no password retrieval, no connect)
+        loginWithCredentials(email, password);
+    }
+}
+
+void CloudDeckManager::startInstanceOnly()
+{
+    qInfo() << "CloudDeck: [MANUAL_START] Starting instance only (no password/connect)...";
+    
+    // Wait for dashboard to load, then click Start
+    QTimer::singleShot(2000, this, [this]() {
+        clickStartButton();
+    });
 }
 
 void CloudDeckManager::clickStartButton()
@@ -797,9 +853,12 @@ void CloudDeckManager::pollInstanceStatus()
             m_waitingForInstanceStart = false;
             emit instanceReady();
             
-            // Re-parse dashboard to get updated info including password
-            m_parseStep = 0;
-            QTimer::singleShot(2000, this, &CloudDeckManager::parseDashboard);
+            // Handle based on operation mode
+            if (m_operationMode == MODE_PAIRING) {
+                handleInstanceRunningForPairing();
+            } else {
+                handleInstanceRunningForManualStart();
+            }
         } else if (status.contains("Starting", Qt::CaseInsensitive)) {
             qInfo() << "CloudDeck: Instance is starting, continuing to poll...";
         } else if (status.contains("Off", Qt::CaseInsensitive) || 
@@ -820,4 +879,20 @@ void CloudDeckManager::waitForInstanceRunning()
     qInfo() << "CloudDeck: waitForInstanceRunning() - starting status polling...";
     m_waitingForInstanceStart = true;
     m_statusPollTimer->start();
+}
+
+void CloudDeckManager::handleInstanceRunningForPairing()
+{
+    qInfo() << "CloudDeck: [PAIRING] Instance running, getting password and connecting...";
+    
+    // Re-parse dashboard to get updated info including password
+    m_parseStep = 0;
+    QTimer::singleShot(2000, this, &CloudDeckManager::parseDashboard);
+}
+
+void CloudDeckManager::handleInstanceRunningForManualStart()
+{
+    qInfo() << "CloudDeck: [MANUAL_START] Instance running, done!";
+    // Just notify that instance is ready, don't get password or connect
+    // The UI will show success message via instanceReady() signal
 }
