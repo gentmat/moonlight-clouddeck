@@ -22,6 +22,11 @@ public:
     Q_INVOKABLE void enterPinAndPair(const QString &pin);
     Q_INVOKABLE void startCloudDeckInstance();
     Q_INVOKABLE void checkInstanceStatus();
+    
+    enum OperationMode {
+        MODE_PAIRING,      // Full pairing flow: login -> start -> get password -> connect -> pair
+        MODE_MANUAL_START  // Just start instance: login -> start -> done
+    };
 
 signals:
     void loginCompleted(bool success, const QString &error);
@@ -51,6 +56,9 @@ private:
     void extractServerAddress();
     void clickStartButton();
     void waitForInstanceRunning();
+    void startInstanceOnly();
+    void handleInstanceRunningForPairing();
+    void handleInstanceRunningForManualStart();
 
     QWebEngineProfile *m_webProfile;
     QWebEnginePage *m_webPage;
@@ -70,4 +78,5 @@ private:
     int m_parseStep;  // 0=parse status, 1=click show password, 2=get password, 3=done
     QTimer *m_statusPollTimer;
     bool m_waitingForInstanceStart;
+    OperationMode m_operationMode;
 };
