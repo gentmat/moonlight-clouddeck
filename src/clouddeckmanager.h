@@ -20,6 +20,8 @@ public:
     Q_INVOKABLE bool hasStoredCredentials();
     Q_INVOKABLE void clearStoredCredentials();
     Q_INVOKABLE void enterPinAndPair(const QString &pin);
+    Q_INVOKABLE void startCloudDeckInstance();
+    Q_INVOKABLE void checkInstanceStatus();
 
 signals:
     void loginCompleted(bool success, const QString &error);
@@ -27,10 +29,14 @@ signals:
     void serverAddressReady(const QString &serverAddress);
     void pairingPinNeeded(const QString &pin);
     void pairingCompleted(bool success, const QString &error);
+    void instanceStarting();
+    void instanceStatusChanged(const QString &status);
+    void instanceReady();
 
 private slots:
     void onPageLoadFinished(bool ok);
     void onLoginFormFilled();
+    void pollInstanceStatus();
 
 private:
     void fillLoginForm(const QString &email, const QString &password);
@@ -43,6 +49,8 @@ private:
     void clickConnectButton();
     void printMachineInfo();
     void extractServerAddress();
+    void clickStartButton();
+    void waitForInstanceRunning();
 
     QWebEngineProfile *m_webProfile;
     QWebEnginePage *m_webPage;
@@ -60,4 +68,6 @@ private:
     QString m_sessionDuration;
     QString m_serverAddress;
     int m_parseStep;  // 0=parse status, 1=click show password, 2=get password, 3=done
+    QTimer *m_statusPollTimer;
+    bool m_waitingForInstanceStart;
 };

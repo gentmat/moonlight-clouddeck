@@ -14,6 +14,8 @@ CloudDeckManager::CloudDeckManager(QObject *parent)
     , m_loginInProgress(false)
     , m_webEngineInitialized(false)
     , m_parseStep(0)
+    , m_statusPollTimer(new QTimer(this))
+    , m_waitingForInstanceStart(false)
 {
     // Set up timeout timer
     m_timeoutTimer->setSingleShot(true);
@@ -32,6 +34,10 @@ CloudDeckManager::CloudDeckManager(QObject *parent)
     
     // Connect poll timer to check page after form submission
     connect(m_pollTimer, &QTimer::timeout, this, &CloudDeckManager::checkPageAfterSubmission);
+    
+    // Set up status poll timer for instance start monitoring
+    m_statusPollTimer->setInterval(5000); // Check every 5 seconds
+    connect(m_statusPollTimer, &QTimer::timeout, this, &CloudDeckManager::pollInstanceStatus);
 }
 
 CloudDeckManager::~CloudDeckManager()
@@ -660,6 +666,158 @@ void CloudDeckManager::printMachineInfo()
     
     emit machineInfoReady(m_machineStatus, m_userPassword, m_sessionDuration);
     
-    // Auto-connect: Click Connect button to get server address
-    QTimer::singleShot(1000, this, &CloudDeckManager::clickConnectButton);
+    // Check if instance is off - if so, start it and wait
+    if (m_machineStatus.contains("Off", Qt::CaseInsensitive) || 
+        m_machineStatus.contains("Stopped", Qt::CaseInsensitive)) {
+        qInfo() << "CloudDeck: Instance is off, starting it...";
+        emit instanceStarting();
+        QTimer::singleShot(1000, this, &CloudDeckManager::clickStartButton);
+    } else {
+        // Instance is running, proceed to connect
+        QTimer::singleShot(1000, this, &CloudDeckManager::clickConnectButton);
+    }
+}
+
+void CloudDeckManager::startCloudDeckInstance()
+{
+    qInfo() << "CloudDeck: startCloudDeckInstance() called";
+    
+    if (!m_webEngineInitialized) {
+        qInfo() << "CloudDeck: Web engine not initialized, cannot start instance";
+        return;
+    }
+    
+    // Navigate to dashboard if not already there
+    if (!m_webPage->url().toString().contains("portal.clouddeck.app")) {
+        qInfo() << "CloudDeck: Navigating to dashboard...";
+        m_webPage->load(QUrl("https://portal.clouddeck.app"));
+        QTimer::singleShot(3000, this, &CloudDeckManager::clickStartButton);
+    } else {
+        clickStartButton();
+    }
+}
+
+void CloudDeckManager::clickStartButton()
+{
+    qInfo() << "CloudDeck: Clicking Start button...";
+    
+    QString script = R"(
+        (function() {
+            var result = {};
+            
+            // Find the Start button
+            var buttons = document.querySelectorAll('button');
+            for (var i = 0; i < buttons.length; i++) {
+                var buttonText = buttons[i].textContent.trim();
+                if (buttonText === 'Start' || buttonText.includes('Start')) {
+                    buttons[i].click();
+                    result.clicked = true;
+                    result.buttonText = buttonText;
+                    return JSON.stringify(result);
+                }
+            }
+            
+            result.clicked = false;
+            result.error = 'Start button not found';
+            return JSON.stringify(result);
+        })();
+    )";
+    
+    m_webPage->runJavaScript(script, [this](const QVariant &result) {
+        QString jsonStr = result.toString();
+        qInfo() << "CloudDeck: Start button click result:" << jsonStr;
+        
+        if (jsonStr.contains("\"clicked\":true")) {
+            qInfo() << "CloudDeck: Start button clicked successfully, waiting for instance to start...";
+            m_waitingForInstanceStart = true;
+            emit instanceStarting();
+            
+            // Start polling for status changes
+            m_statusPollTimer->start();
+        } else {
+            qInfo() << "CloudDeck: Failed to click Start button";
+        }
+    });
+}
+
+void CloudDeckManager::pollInstanceStatus()
+{
+    qInfo() << "CloudDeck: Polling instance status...";
+    
+    QString script = R"(
+        (function() {
+            var result = {};
+            
+            // Get machine status
+            var statusElement = document.querySelector('app-machine-status');
+            if (statusElement) {
+                result.status = statusElement.textContent.trim();
+            } else {
+                // Try to find status in body text
+                var bodyText = document.body.innerText;
+                if (bodyText.includes('Running')) {
+                    result.status = 'Running';
+                } else if (bodyText.includes('Starting')) {
+                    result.status = 'Starting';
+                } else if (bodyText.includes('Off')) {
+                    result.status = 'Off';
+                } else if (bodyText.includes('Stopped')) {
+                    result.status = 'Stopped';
+                } else {
+                    result.status = 'Unknown';
+                }
+            }
+            
+            return JSON.stringify(result);
+        })();
+    )";
+    
+    m_webPage->runJavaScript(script, [this](const QVariant &result) {
+        QString jsonStr = result.toString();
+        qInfo() << "CloudDeck: Status poll result:" << jsonStr;
+        
+        // Extract status from JSON
+        QString status = "Unknown";
+        if (jsonStr.contains("\"status\":\"")) {
+            int start = jsonStr.indexOf("\"status\":\"") + 11;
+            int end = jsonStr.indexOf("\"", start);
+            if (start > 10 && end > start) {
+                status = jsonStr.mid(start, end - start);
+            }
+        }
+        
+        qInfo() << "CloudDeck: Current status:" << status;
+        m_machineStatus = status;
+        emit instanceStatusChanged(status);
+        
+        // Check if instance is now running
+        if (status.contains("Running", Qt::CaseInsensitive)) {
+            qInfo() << "CloudDeck: Instance is now running!";
+            m_statusPollTimer->stop();
+            m_waitingForInstanceStart = false;
+            emit instanceReady();
+            
+            // Re-parse dashboard to get updated info including password
+            m_parseStep = 0;
+            QTimer::singleShot(2000, this, &CloudDeckManager::parseDashboard);
+        } else if (status.contains("Starting", Qt::CaseInsensitive)) {
+            qInfo() << "CloudDeck: Instance is starting, continuing to poll...";
+        } else if (status.contains("Off", Qt::CaseInsensitive) || 
+                   status.contains("Stopped", Qt::CaseInsensitive)) {
+            qInfo() << "CloudDeck: Instance is still off/stopped";
+        }
+    });
+}
+
+void CloudDeckManager::checkInstanceStatus()
+{
+    qInfo() << "CloudDeck: checkInstanceStatus() called";
+    pollInstanceStatus();
+}
+
+void CloudDeckManager::waitForInstanceRunning()
+{
+    qInfo() << "CloudDeck: waitForInstanceRunning() - starting status polling...";
+    m_waitingForInstanceStart = true;
+    m_statusPollTimer->start();
 }
