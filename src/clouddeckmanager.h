@@ -57,6 +57,7 @@ private:
     void clickStartButton();
     void waitForInstanceRunning();
     void startInstanceOnly();
+    void checkInstanceStatusForManualStart();
     void handleInstanceRunningForPairing();
     void handleInstanceRunningForManualStart();
 

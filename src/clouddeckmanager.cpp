@@ -747,9 +747,61 @@ void CloudDeckManager::startInstanceOnly()
 {
     qInfo() << "CloudDeck: [MANUAL_START] Starting instance only (no password/connect)...";
     
-    // Wait for dashboard to load, then click Start
+    // Wait for dashboard to load, then check status
     QTimer::singleShot(2000, this, [this]() {
-        clickStartButton();
+        checkInstanceStatusForManualStart();
+    });
+}
+
+void CloudDeckManager::checkInstanceStatusForManualStart()
+{
+    qInfo() << "CloudDeck: [MANUAL_START] Checking instance status...";
+    
+    QString script = R"(
+        (function() {
+            var result = {};
+            
+            // Get machine status
+            var statusElement = document.querySelector('app-machine-status');
+            if (statusElement) {
+                result.status = statusElement.textContent.trim();
+            } else {
+                var bodyText = document.body.innerText;
+                if (bodyText.includes('Running')) {
+                    result.status = 'Running';
+                } else if (bodyText.includes('Starting')) {
+                    result.status = 'Starting';
+                } else if (bodyText.includes('Off') || bodyText.includes('Stopped')) {
+                    result.status = 'Off';
+                } else {
+                    result.status = 'Unknown';
+                }
+            }
+            
+            return JSON.stringify(result);
+        })();
+    )";
+    
+    m_webPage->runJavaScript(script, [this](const QVariant &result) {
+        QString jsonStr = result.toString();
+        qInfo() << "CloudDeck: [MANUAL_START] Status check result:" << jsonStr;
+        
+        if (jsonStr.contains("\"status\":\"Running\"")) {
+            qInfo() << "CloudDeck: [MANUAL_START] Instance already running!";
+            emit instanceReady();
+            emit instanceStatusChanged("Running");
+        } else if (jsonStr.contains("\"status\":\"Starting\"")) {
+            qInfo() << "CloudDeck: [MANUAL_START] Instance is starting, polling...";
+            m_waitingForInstanceStart = true;
+            emit instanceStarting();
+            m_statusPollTimer->start();
+        } else if (jsonStr.contains("\"status\":\"Off\"") || jsonStr.contains("\"status\":\"Stopped\"")) {
+            qInfo() << "CloudDeck: [MANUAL_START] Instance is off, starting it...";
+            clickStartButton();
+        } else {
+            qInfo() << "CloudDeck: [MANUAL_START] Unknown status, attempting to start...";
+            clickStartButton();
+        }
     });
 }
 
