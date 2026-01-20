@@ -779,9 +779,9 @@ void CloudDeckManager::pollInstanceStatus()
         // Extract status from JSON
         QString status = "Unknown";
         if (jsonStr.contains("\"status\":\"")) {
-            int start = jsonStr.indexOf("\"status\":\"") + 11;
+            int start = jsonStr.indexOf("\"status\":\"") + 10;
             int end = jsonStr.indexOf("\"", start);
-            if (start > 10 && end > start) {
+            if (start > 9 && end > start) {
                 status = jsonStr.mid(start, end - start);
             }
         }
