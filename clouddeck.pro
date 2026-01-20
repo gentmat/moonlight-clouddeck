@@ -1,10 +1,12 @@
-QT += core webengine webenginewidgets
+QT += core webenginecore webenginewidgets
 CONFIG += c++11
 
 TEMPLATE = lib
 CONFIG += staticlib
 
 TARGET = clouddeck
+
+include(../globaldefs.pri)
 
 SOURCES += \
     src/clouddeckmanager.cpp
